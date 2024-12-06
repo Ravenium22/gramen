@@ -1,10 +1,13 @@
 import os
-import boto3
-from boto3.dynamodb.conditions import Key
 import discord
 from discord.ext import commands
 import asyncio
 import aiohttp
+import boto3
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
 dynamodb = boto3.resource('dynamodb',
     aws_access_key_id=os.environ.get('AWS_ACCESS_KEY'),
