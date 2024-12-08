@@ -1,79 +1,92 @@
-# bot.py
+import os
 import discord
 from discord.ext import commands
 import boto3
-import time
-from datetime import datetime
-import asyncio
 
 # Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.members = True  # Needed for user tracking
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# AWS DynamoDB setup
-dynamodb = boto3.resource('dynamodb')
+# AWS Setup
+dynamodb = boto3.resource(
+    'dynamodb',
+    aws_access_key_id=os.environ.get('AWS_ACCESS_KEY'),
+    aws_secret_access_key=os.environ.get('AWS_SECRET_KEY'),
+    region_name='us-east-1'
+)
+
 users_table = dynamodb.Table('discord_users')
-messages_table = dynamodb.Table('discord_messages')
+
+async def setup_users_table():
+    try:
+        # Create users table if it doesn't exist
+        response = dynamodb.create_table(
+            TableName='discord_users',
+            KeySchema=[
+                {'AttributeName': 'author_id', 'KeyType': 'HASH'}
+            ],
+            AttributeDefinitions=[
+                {'AttributeName': 'author_id', 'AttributeType': 'S'}
+            ],
+            BillingMode='PAY_PER_REQUEST'
+        )
+        response.wait_until_exists()
+        print("Users table created and ready.")
+    except dynamodb.meta.client.exceptions.ResourceInUseException:
+        print("Users table already exists.")
+    except Exception as e:
+        print(f"Error creating users table: {e}")
 
 async def update_user_info(member):
-    """Update user information in DynamoDB"""
+    """Update user information including avatar in DynamoDB"""
     try:
+        avatar_url = str(member.avatar.url) if member.avatar else str(member.default_avatar.url)
+        
         user_info = {
             'author_id': str(member.id),
             'username': member.name,
             'display_name': member.display_name,
-            'last_updated': int(time.time())
+            'avatar_url': avatar_url,
+            'last_updated': str(discord.utils.utcnow())
         }
         
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: users_table.put_item(Item=user_info)
-        )
+        users_table.put_item(Item=user_info)
         print(f"Updated user info for {user_info['username']}")
     except Exception as e:
         print(f"Error updating user info: {e}")
 
 @bot.event
 async def on_ready():
-    print(f'Bot is ready! Logged in as {bot.user.name}')
-    # Collect all current users when bot starts
+    print('Bot started')
+    await setup_users_table()
+    
+    # Collect initial user information from all guilds
+    print("Starting user collection...")
     for guild in bot.guilds:
-        async for member in guild.fetch_members():
-            await update_user_info(member)
+        print(f"Collecting users from: {guild.name}")
+        try:
+            async for member in guild.fetch_members():
+                await update_user_info(member)
+        except Exception as e:
+            print(f"Error collecting users from guild {guild.name}: {e}")
+    print("Initial user collection completed!")
 
 @bot.event
 async def on_member_update(before, after):
     """Update user info when member details change"""
-    await update_user_info(after)
+    if before.avatar != after.avatar or before.name != after.name or before.display_name != after.display_name:
+        await update_user_info(after)
 
 @bot.event
-async def on_message(message):
-    """Store message and update user info when messages are sent"""
-    if message.author.bot:
-        return
+async def on_user_update(before, after):
+    """Update user info when user details change"""
+    if before.avatar != after.avatar or before.name != after.name:
+        for guild in bot.guilds:
+            member = guild.get_member(after.id)
+            if member:
+                await update_user_info(member)
+                break
 
-    # Update user info
-    if message.guild:
-        await update_user_info(message.author)
-
-    # Store message
-    try:
-        message_data = {
-            'message_id': str(message.id),
-            'author_id': str(message.author.id),
-            'channel_id': str(message.channel.id),
-            'content': message.content,
-            'timestamp': int(message.created_at.timestamp()),
-            'replied_to': str(message.reference.message_id) if message.reference else None
-        }
-        
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: messages_table.put_item(Item=message_data)
-        )
-    except Exception as e:
-        print(f"Error storing message: {e}")
-
-    await bot.process_commands(message)
+bot.run(os.environ['DISCORD_TOKEN'])
